@@ -39,6 +39,9 @@ Now a UNIX domain socket is created at `/var/run/usbmuxd`, which forwards
 anything to the same socket on the remote host. Try running `idevice_id` to
 see if it works.
 
+You can take down the tunnel by running `tunnel-usbmuxd -k`. You can also
+check if it's running by `tunnel-usbmuxd -s`.
+
 
 # Who made this sh\*t?
 
