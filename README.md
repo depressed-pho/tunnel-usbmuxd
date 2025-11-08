@@ -33,7 +33,8 @@ with the native one.
 4. Install [socat](http://www.dest-unreach.org/socat/) and put it in your
    `PATH`.
 5. Clone the repository and copy `tunnel-usbmuxd` somewhere in your `PATH`.
-6. Run `tunnel-usbmuxd HOST` to establish a tunnel to the `HOST`.
+6. Run `tunnel-usbmuxd HOST` to establish a tunnel to the `HOST`. Run it as
+   a regular user, not a root.
 
 Now a UNIX domain socket is created at `/var/run/usbmuxd`, which forwards
 anything to the same socket on the remote host. Try running `idevice_id` to
