@@ -47,3 +47,6 @@ check if it's running by `tunnel-usbmuxd -s`.
 # Who made this sh\*t?
 
 PHO made it and licensed it under [the Unlicense](https://unlicense.org/).
+
+`tunnel-usbmuxd` is an independent software application and has **of course
+not** been authorized, sponsored or otherwise approved by Apple Inc.
