@@ -30,6 +30,11 @@ function fatal() {
     exit 1
 }
 
+function as_root() {
+    echo >&2 "sudo" "$@"
+    sudo "$@"
+}
+
 function main() {
     local opt OPTARG OPTIND
     local -i force=0
@@ -65,7 +70,10 @@ function main() {
     # Done parsing options. Now open a tunnel. Does the local socket exist?
     if [[ -e "$local_socket" ]]; then
         if (( force )); then
-            rm -f "$local_socket"
+            if ! rm -f "$local_socket" >/dev/null 2>&1; then
+                # Couldn't remove it. Maybe we need a root privilege?
+                as_root rm -f "$local_socket"
+            fi
         else
             fatal "File \`$local_socket' already exists. Maybe you want to use the -f option?"
         fi
