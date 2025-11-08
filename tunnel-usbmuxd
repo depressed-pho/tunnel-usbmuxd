@@ -234,7 +234,7 @@ function main() {
         )
         ssh "${args[@]}"
 
-        # Save the path to the control socket so that we can use it later.
+        # Save the path to the control socket. We will need it later.
         save_state "ssh-ctrl" "$ssh_ctrl"
 
         info "Tunnel established from local ${local_socket} to remote ${remote_socket}"
@@ -242,9 +242,9 @@ function main() {
         # We probably need a root privilege to listen on it. But the thing
         # is that we cannot simply run ssh(1) as root, because ssh(1) most
         # likely needs to talk to an ssh-agent(1) running as the current
-        # user. So instead we listen on a socket located at somewhere we
-        # can create files, and then open another tunnel forwarding from
-        # the intended path to the intermediate path.
+        # user. So instead we listen on a socket located somewhere we can
+        # create files, and then open another tunnel forwarding from the
+        # intended path to the intermediate path.
         #
         # But why don't we just symlink the socket? Because then there is
         # no way we can unlink it after taking the tunnel down.
