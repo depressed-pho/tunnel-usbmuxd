@@ -4,12 +4,16 @@ set -o errexit -o nounset
 readonly DEFAULT_LOCAL_SOCKET="/var/run/usbmuxd"
 readonly DEFAULT_REMOTE_SOCKET="/var/run/usbmuxd"
 readonly PROGNAME="${0##*/}"
+readonly XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+readonly STATE_FILE="${XDG_STATE_HOME}/tunnel-usbmuxd.state"
 
 function usage() {
     echo >&2 "Usage: ${PROGNAME} [-f] [-L SOCKET-PATH] [-R SOCKET-PATH] REMOTE-HOST"
     echo >&2
     echo >&2 "Options:"
     echo >&2 "  -h              Show this message."
+    echo >&2 "  -s              Show the status of an existing tunnel if there is any."
+    echo >&2 "  -k              Kill an existing tunnel if there is any."
     echo >&2 "  -f              Unlink the local socket file if it's already"
     echo >&2 "                  present. Use this with care."
     echo >&2 "  -L SOCKET-PATH  Specify the path to the unix domain socket"
@@ -35,15 +39,130 @@ function as_root() {
     sudo "$@"
 }
 
+# "runtime_file FILENAME" returns a path to a file in either
+# XDG_RUNTIME_DIR or TMPDIR.
+function runtime_file() {
+    local name="$1"
+
+    local runtime_dir="${XDG_RUNTIME_DIR:-}"
+    if [[ -z "$runtime_dir" ]]; then
+        # .${UID} so that it won't conflict with other users.
+        echo "${TMPDIR:-/tmp}/${name}.${UID}"
+    else
+        echo "${runtime_dir}/${name}"
+    fi
+}
+
+function load_state() {
+    local key="$1"
+
+    if [[ -f "$STATE_FILE" ]]; then
+        local line
+        while read -r line; do
+            if [[ "${line%% *}" = "$key" ]]; then
+                echo "${line#* }"
+                return 0
+            fi
+        done < "$STATE_FILE"
+    fi
+    return 1
+}
+
+function save_state() {
+    local key="$1"
+    local value="$2"
+
+    local -A states
+    if [[ -f "$STATE_FILE" ]]; then
+        local line
+        while read -r line; do
+            states["${line%% *}"]="${line#* }"
+        done < "$STATE_FILE"
+    fi
+
+    states["$key"]="$value"
+
+    local tmp k
+    tmp=$(mktemp)
+    for k in "${!states[@]}"; do
+        echo "$k" "${states[$k]}" >>"$tmp"
+    done
+    mv -f "$tmp" "$STATE_FILE"
+}
+
+function delete_all_states() {
+    rm -f "$STATE_FILE"
+}
+
+function check_status() {
+    local ssh_ctrl remote_host
+    ssh_ctrl=$(load_state "ssh-ctrl" || true)
+    remote_host=$(load_state "remote-host" || true)
+
+    if [[ -n "$ssh_ctrl" && -n "$remote_host" ]]; then
+        if ssh -S "$ssh_ctrl" -O check "$remote_host" >/dev/null 2>&1; then
+            # The SSH session is alive. What about the intermediate tunnel?
+            # Do we even have one?
+            local socat_pid
+            socat_pid=$(load_state "socat-pid" || true)
+            if [[ -n "$socat_pid" ]]; then
+                # Okay, we seem to have one. But is it still alive? Note
+                # that we can't use "kill -0" because it's most likely
+                # running as another user. But I don't know if "ps -p" is
+                # portable or not. Probably not.
+                if ps -p "$socat_pid" >/dev/null 2>&1; then
+                    info "The tunnel is up and running."
+                    return 0
+                else
+                    info "The SSH tunnel is up, but an intermediate tunnel seems to be down."
+                    return 1
+                fi
+            else
+                info "The tunnel is up and running."
+                return 0
+            fi
+        fi
+    fi
+
+    info "The tunnel is down."
+    return 1
+}
+
+function kill_tunnel() {
+    local ssh_ctrl remote_host
+    ssh_ctrl=$(load_state "ssh-ctrl" || true)
+    remote_host=$(load_state "remote-host" || true)
+    if [[ -n "$ssh_ctrl" && -n "$remote_host" ]]; then
+        # But we don't know if it's still alive.
+        ssh -S "$ssh_ctrl" -O exit "$remote_host" || true
+    fi
+
+    local socat_pid
+    socat_pid=$(load_state "socat-pid" || true)
+    if [[ -n "$socat_pid" ]]; then
+        as_root kill "$socat_pid"
+    fi
+
+    delete_all_states
+    info "The tunnel is down now."
+    return 0
+}
+
 function main() {
     local opt OPTARG OPTIND
     local -i force=0
     local local_socket="$DEFAULT_LOCAL_SOCKET"
     local remote_socket="$DEFAULT_REMOTE_SOCKET"
-    while getopts hfL:R: opt; do
+    while getopts hskfL:R: opt; do
         case "$opt" in
             h)
                 usage
+                exit 0;;
+            s)
+                check_status
+                exit 0;;
+            k)
+                kill_tunnel
                 exit 0;;
             f)
                 force=1;;
@@ -67,6 +186,20 @@ function main() {
             exit 1
     esac
 
+    # Do we have a running tunnel?
+    if check_status >/dev/null 2>&1; then
+        fatal "The tunnel is already up and running. Maybe you want to kill it with the -k option?"
+    else
+        # Make sure everything is down, including the intermediate one.
+        if ! kill_tunnel >/dev/null 2>&1; then
+            # Failed to kill it. Why? Try again without output suppressed.
+            kill_tunnel
+        fi
+    fi
+
+    # We will need this to later control the SSH master.
+    save_state "remote-host" "$remote_host"
+
     # Done parsing options. Now open a tunnel. Does the local socket exist?
     if [[ -e "$local_socket" ]]; then
         if (( force )); then
@@ -84,15 +217,26 @@ function main() {
         # Yes we can. But we first need to clean up the empty file we just
         # created.
         rm -f "$local_socket"
+
+        # Open an SSH tunnel in master mode so that we can terminate it later.
+        local ssh_ctrl
+        ssh_ctrl=$(runtime_file "tunnel-usbmuxd.ctrl")
+
         local -a args=(
             "-f" # Go to background.
             "-N" # Do not execute a remote command.
             "-T" # Disable pseudo-terminal allocation.
+            "-M" # Place SSH in master mode.
+            "-S" "$ssh_ctrl"
             "-L" "${local_socket}:${remote_socket}"
             "-o" "ExitOnForwardFailure YES"
             "$remote_host"
         )
         ssh "${args[@]}"
+
+        # Save the path to the control socket so that we can use it later.
+        save_state "ssh-ctrl" "$ssh_ctrl"
+
         info "Tunnel established from local ${local_socket} to remote ${remote_socket}"
     else
         # We probably need a root privilege to listen on it. But the thing
@@ -109,36 +253,58 @@ function main() {
             fatal "socat not found in PATH: $PATH"
         fi
 
-        local runtime_dir="${XDG_RUNTIME_DIR:-}"
-        if [[ -z "$runtime_dir" ]]; then
-            runtime_dir="${TMPDIR:-/tmp}"
-        fi
-
-        local intermed_socket="${runtime_dir}/tunnel-usbmuxd.${UID}"
+        local intermed_socket
+        intermed_socket=$(runtime_file "tunnel-usbmuxd.sock")
         rm -f "$intermed_socket"
+
+        # Open an SSH tunnel in master mode so that we can terminate it later.
+        local ssh_ctrl
+        ssh_ctrl=$(runtime_file "tunnel-usbmuxd.ctrl")
+
         local -a args=(
             "-f" # Go to background.
             "-N" # Do not execute a remote command.
             "-T" # Disable pseudo-terminal allocation.
+            "-M" # Place SSH in master mode.
+            "-S" "$ssh_ctrl"
             "-L" "${intermed_socket}:${remote_socket}"
             "-o" "ExitOnForwardFailure YES"
             "$remote_host"
         )
         ssh "${args[@]}"
 
-        local -a args=(
+        # Save the path to the control socket so that we can use it later.
+        save_state "ssh-ctrl" "$ssh_ctrl"
+
+        # Open a named pipe so that we can obtain the pid of the process
+        # spawned as root.
+        local pipe
+        pipe=$(mktemp)
+        rm -f "$pipe"
+        mkfifo "$pipe"
+
+        local -a socat_cmd=(
+            "socat"
             "UNIX-LISTEN:${local_socket},fork,mode=666" # fork: Accept connections and fork children.
             "UNIX-CONNECT:${intermed_socket}"
         )
+        info "sudo" "${socat_cmd[@]}"
+
         local -a cmd=(
             "sudo"
             "--preserve-env"
             "--background"
             "$BASH"
-            "-c"
-            "socat ${args[*]}"
+            "-s" "--" "${socat_cmd[@]}"
         )
-        "${cmd[@]}"
+        "${cmd[@]}" <<< "echo \$\$ >\"$pipe\"; exec \"\$@\""
+
+        # Read the pid of the child, then unlink the pipe.
+        local pid
+        read -r pid <"$pipe"
+        rm -f "$pipe"
+        save_state "socat-pid" "$pid"
+
         info "Tunnel established from local ${local_socket} to remote ${remote_socket}"
     fi
 }
