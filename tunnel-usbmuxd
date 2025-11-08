@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -o errexit -o nounset
+
+readonly DEFAULT_LOCAL_SOCKET="/var/run/usbmuxd"
+readonly DEFAULT_REMOTE_SOCKET="/var/run/usbmuxd"
+readonly PROGNAME="${0##*/}"
+
+function usage() {
+    echo >&2 "Usage: ${PROGNAME} [-f] [-L SOCKET-PATH] [-R SOCKET-PATH] REMOTE-HOST"
+    echo >&2
+    echo >&2 "Options:"
+    echo >&2 "  -h              Show this message."
+    echo >&2 "  -f              Unlink the local socket file if it's already"
+    echo >&2 "                  present. Use this with care."
+    echo >&2 "  -L SOCKET-PATH  Specify the path to the unix domain socket"
+    echo >&2 "                  to listen on the local host."
+    echo >&2 "                  (default: ${DEFAULT_LOCAL_SOCKET})"
+    echo >&2 "  -R SOCKET-PATH  Specify the path to the unix domain socket"
+    echo >&2 "                  to connect to on the remote host."
+    echo >&2 "                  (default: ${DEFAULT_REMOTE_SOCKET})"
+    echo >&2 "  REMOTE-HOST     The remote host to connect to with ssh(1)."
+}
+
+function info() {
+    echo >&2 "$@"
+}
+
+function fatal() {
+    echo >&2 "$PROGNAME:" "$@"
+    exit 1
+}
+
+function main() {
+    local opt OPTARG OPTIND
+    local -i force=0
+    local local_socket="$DEFAULT_LOCAL_SOCKET"
+    local remote_socket="$DEFAULT_REMOTE_SOCKET"
+    while getopts hfL:R: opt; do
+        case "$opt" in
+            h)
+                usage
+                exit 0;;
+            f)
+                force=1;;
+            L)
+                local_socket="$OPTARG";;
+            R)
+                remote_socket="$OPTARG";;
+            \?)
+                usage
+                exit 1
+        esac
+    done
+    shift $(( OPTIND - 1 ))
+
+    local remote_host=""
+    case $# in
+        1)
+            remote_host="$1";;
+        *)
+            usage
+            exit 1
+    esac
+
+    # Done parsing options. Now open a tunnel. Does the local socket exist?
+    if [[ -e "$local_socket" ]]; then
+        if (( force )); then
+            rm -f "$local_socket"
+        else
+            fatal "File \`$local_socket' already exists. Maybe you want to use the -f option?"
+        fi
+    fi
+
+    # Can we listen on the local socket as the current user?
+    if touch "$local_socket" >/dev/null 2>&1; then
+        # Yes we can. But we first need to clean up the empty file we just
+        # created.
+        rm -f "$local_socket"
+        local -a args=(
+            "-f" # Go to background.
+            "-N" # Do not execute a remote command.
+            "-T" # Disable pseudo-terminal allocation.
+            "-L" "${local_socket}:${remote_socket}"
+            "-o" "ExitOnForwardFailure YES"
+            "$remote_host"
+        )
+        ssh "${args[@]}"
+        info "Tunnel established from local ${local_socket} to remote ${remote_socket}"
+    else
+        # We probably need a root privilege to listen on it. But the thing
+        # is that we cannot simply run ssh(1) as root, because ssh(1) most
+        # likely needs to talk to an ssh-agent(1) running as the current
+        # user. So instead we listen on a socket located at somewhere we
+        # can create files, and then open another tunnel forwarding from
+        # the intended path to the intermediate path.
+        #
+        # But why don't we just symlink the socket? Because then there is
+        # no way we can unlink it after taking the tunnel down.
+        #
+        if ! type -p socat >/dev/null 2>&1; then
+            fatal "socat not found in PATH: $PATH"
+        fi
+
+        local runtime_dir="${XDG_RUNTIME_DIR:-}"
+        if [[ -z "$runtime_dir" ]]; then
+            runtime_dir="${TMPDIR:-/tmp}"
+        fi
+
+        local intermed_socket="${runtime_dir}/tunnel-usbmuxd.${UID}"
+        rm -f "$intermed_socket"
+        local -a args=(
+            "-f" # Go to background.
+            "-N" # Do not execute a remote command.
+            "-T" # Disable pseudo-terminal allocation.
+            "-L" "${intermed_socket}:${remote_socket}"
+            "-o" "ExitOnForwardFailure YES"
+            "$remote_host"
+        )
+        ssh "${args[@]}"
+
+        local -a args=(
+            "UNIX-LISTEN:${local_socket},fork,mode=666" # fork: Accept connections and fork children.
+            "UNIX-CONNECT:${intermed_socket}"
+        )
+        local -a cmd=(
+            "sudo"
+            "--preserve-env"
+            "--background"
+            "$BASH"
+            "-c"
+            "socat ${args[*]}"
+        )
+        "${cmd[@]}"
+        info "Tunnel established from local ${local_socket} to remote ${remote_socket}"
+    fi
+}
+
+main "$@"
