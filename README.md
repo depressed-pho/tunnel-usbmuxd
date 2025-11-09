@@ -21,7 +21,7 @@ either a Linux machine running open-source `usbmuxd` or a macOS machine
 with the native one.
 
 
-# How do I use this sh\*t?
+# How to use
 
 1. Install [OpenSSH](https://www.openssh.org/) if your machine somehow
    doesn't have it.
@@ -44,9 +44,10 @@ You can take down the tunnel by running `tunnel-usbmuxd -k`. You can also
 check if it's running by `tunnel-usbmuxd -s`.
 
 
-# Who made this sh\*t?
+# Author
 
-PHO made it and licensed it under [the Unlicense](https://unlicense.org/).
+PHO wrote the script and licensed it under [the
+Unlicense](https://unlicense.org/).
 
-`tunnel-usbmuxd` is an independent software application and has **of course
-not** been authorized, sponsored or otherwise approved by Apple Inc.
+`tunnel-usbmuxd` is an independent software application and has not been
+authorized, sponsored or otherwise approved by Apple Inc.
